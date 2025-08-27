@@ -1,0 +1,21 @@
+services:
+  database:
+    image: postgres:17.6-alpine
+    volumes:
+      - database:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gecko_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gecko_password}
+      POSTGRES_DB: ${POSTGRES_DATABASE:-gecko_recipes}
+    healthcheck:
+      test: "/usr/bin/pg_isready"
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  database:
+  test-database:

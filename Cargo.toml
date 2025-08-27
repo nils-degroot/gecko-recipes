@@ -1,0 +1,21 @@
+[package]
+name = "gecko-recipes"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+actix-web = "4.11.0"
+clap = { version = "4.5.45", features = ["derive", "env"] }
+eyre = "0.6.12"
+secrecy = "0.10.3"
+serde = { version = "1.0.219", features = ["derive"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres"] }
+thiserror = "2.0.16"
+tokio = { version = "1.47.1", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+
+[dev-dependencies]
+assert2 = "0.3.15"
+reqwest = { version = "0.12.23", features = ["json"] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "postgres", "migrate"] }
