@@ -185,3 +185,4 @@ The project includes Docker Compose configuration for easy database setup:
 | Implement core layer | 30m |
 | Implement web layer | 30m |
 | Write README.md and module documentation | 30m |
+| Implement search endpoint | 30m |
