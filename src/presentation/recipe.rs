@@ -4,14 +4,14 @@ use actix_web::{
     HttpResponse, ResponseError, delete, get,
     http::header::ContentType,
     post, put,
-    web::{Data, Json, Path},
+    web::{Data, Json, Path, Query},
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
     RecipeService,
-    core::recipe::{Ingredient, NewRecipe, Recipe},
+    core::recipe::{Ingredient, NewRecipe, Recipe, SearchCriteria},
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -247,6 +247,40 @@ pub(crate) async fn list_recipes(
     Ok(Json(recipes.into_iter().map(RecipeDto::from).collect()))
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct SearchQuery {
+    recipe_name: Option<String>,
+    ingredient_name: Option<String>,
+    meal_type: Option<MealType>,
+}
+
+impl From<SearchQuery> for SearchCriteria {
+    fn from(value: SearchQuery) -> Self {
+        Self {
+            recipe_name: value.recipe_name,
+            ingredient_name: value.ingredient_name,
+            meal_type: value.meal_type.map(|mt| mt.into()),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum SearchRecipeError {
+    #[error("Failed to search recipes: {0}")]
+    Unknown(#[from] crate::core::recipe::SearchRecipeError),
+}
+
+impl ResponseError for SearchRecipeError {}
+
+#[get("/recipes/search")]
+pub(crate) async fn search_recipes(
+    svc: Data<RecipeService>,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<Vec<RecipeDto>>, SearchRecipeError> {
+    let recipes = svc.search_recipes(query.into()).await?;
+    Ok(Json(recipes.into_iter().map(RecipeDto::from).collect()))
+}
+
 #[post("/recipes")]
 pub(crate) async fn create_recipe(
     svc: Data<RecipeService>,
@@ -296,31 +330,33 @@ mod tests {
 
     static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
+    macro_rules! setup_app {
+        ($pool:expr) => {{
+            use crate::Postgres;
+            use actix_web::App;
+
+            let postgres = Postgres::new($pool);
+
+            let recipe_service = RecipeService::new(postgres);
+
+            test::init_service(
+                App::new()
+                    .service(list_recipes)
+                    .service(search_recipes)
+                    .service(create_recipe)
+                    .service(update_recipe)
+                    .service(delete_recipe)
+                    .app_data(Data::new(recipe_service.clone())),
+            )
+            .await
+        }};
+    }
+
     mod list_recipes {
-        use actix_web::{App, http::StatusCode};
+        use actix_web::http::StatusCode;
         use sqlx::PgPool;
 
-        use crate::Postgres;
-
         use super::*;
-
-        macro_rules! setup_app {
-            ($pool:expr) => {{
-                let postgres = Postgres::new($pool);
-
-                let recipe_service = RecipeService::new(postgres);
-
-                test::init_service(
-                    App::new()
-                        .service(list_recipes)
-                        .service(create_recipe)
-                        .service(update_recipe)
-                        .service(delete_recipe)
-                        .app_data(Data::new(recipe_service.clone())),
-                )
-                .await
-            }};
-        }
 
         #[sqlx::test(migrator = "super::MIGRATOR")]
         async fn it_should_return_200(pool: PgPool) {

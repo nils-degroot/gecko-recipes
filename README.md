@@ -54,9 +54,40 @@ The API will be available at `http://127.0.0.1:8080`
 ## API Endpoints
 
 - `GET /recipes` - List all recipes
+- `GET /recipes/search` - Search recipes with optional filters
 - `POST /recipes` - Create a new recipe
 - `PUT /recipes/{id}` - Update an existing recipe
 - `DELETE /recipes/{id}` - Delete a recipe
+
+### Search Recipes
+
+The search endpoint supports optional query parameters for filtering:
+
+```
+GET /recipes/search?recipe_name=pancake&ingredient_name=flour&meal_type=Breakfast
+```
+
+**Query Parameters:**
+- `recipe_name` (optional) - Partial match for recipe name (case-insensitive)
+- `ingredient_name` (optional) - Partial match for ingredient name (case-insensitive)  
+- `meal_type` (optional) - Exact match for meal type (`Breakfast`, `Lunch`, or `Dinner`)
+
+**Examples:**
+```bash
+# Find all breakfast recipes
+GET /recipes/search?meal_type=Breakfast
+
+# Find recipes containing "chocolate" in the name
+GET /recipes/search?recipe_name=chocolate
+
+# Find recipes with flour as an ingredient
+GET /recipes/search?ingredient_name=flour
+
+# Combine multiple criteria
+GET /recipes/search?recipe_name=pancake&meal_type=Breakfast&ingredient_name=flour
+```
+</text>
+
 
 ### Recipe Data Structure
 

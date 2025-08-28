@@ -54,6 +54,7 @@ pub async fn server(config: Config) -> eyre::Result<()> {
     HttpServer::new(move || {
         App::new()
             .service(crate::presentation::recipe::list_recipes)
+            .service(crate::presentation::recipe::search_recipes)
             .service(crate::presentation::recipe::create_recipe)
             .service(crate::presentation::recipe::update_recipe)
             .service(crate::presentation::recipe::delete_recipe)

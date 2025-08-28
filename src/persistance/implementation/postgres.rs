@@ -6,7 +6,7 @@ use sqlx::{PgPool, PgTransaction, QueryBuilder, types::Json};
 use crate::persistance::recipe::{
     CreateRecipeError, DeleteRecipeError, IngredientEntity, ListRecipeError, MealType,
     MutableIngredientEntity, MutableRecipeEntity, RecipeEntity, RecipeRepository,
-    UpdateRecipeError,
+    SearchRecipeError, SearchRecipesArguments, UpdateRecipeError,
 };
 
 #[derive(Debug, Clone)]
@@ -193,6 +193,64 @@ impl RecipeRepository for Postgres {
                 .wrap_err("Failed to rollback transaction")?;
             Err(DeleteRecipeError::NotFound)
         }
+    }
+
+    async fn search_recipes(
+        &self,
+        args: SearchRecipesArguments,
+    ) -> Result<Vec<RecipeEntity>, SearchRecipeError> {
+        let data = sqlx::query!(
+            r#"
+                WITH ingredients_json AS (
+                    SELECT recipe_id, ROW_TO_JSON(i) AS json FROM ingredient i
+                ), ingredients_grouped AS (
+                    SELECT recipe_id, JSON_AGG(ij.json) AS ingredients
+                    FROM ingredients_json ij
+                    GROUP BY recipe_id
+                )
+
+                SELECT
+                    r.recipe_id,
+                    r.name,
+                    description,
+                    cooking_time_secs,
+                    ig.ingredients AS "ingredients: Json<Vec<IngredientEntity>>",
+                    meal_type AS "meal_type: MealType"
+                    FROM recipe r
+                LEFT JOIN ingredients_grouped ig ON ig.recipe_id = r.recipe_id
+                WHERE
+                    ($1::TEXT IS NULL OR r.name ILIKE '%' || $1 || '%') AND
+                    ($2::TEXT IS NULL OR EXISTS (
+                        SELECT 1 FROM ingredient i2
+                        WHERE i2.recipe_id = r.recipe_id
+                        AND i2.name ILIKE '%' || $2 || '%'
+                    )) AND
+                    ($3::meal_type IS NULL OR r.meal_type = $3::meal_type)
+            "#,
+            args.recipe_name,
+            args.ingredient_name,
+            args.meal_type.as_ref() as Option<&MealType>,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .wrap_err("Failed to query for recipes")?;
+
+        Ok(data
+            .into_iter()
+            .map(|row| RecipeEntity {
+                recipe_id: row.recipe_id,
+                name: row.name,
+                description: row.description,
+                ingredients: row
+                    .ingredients
+                    .map(|ingredient| ingredient.0)
+                    .unwrap_or_default(),
+                cooking_time: row
+                    .cooking_time_secs
+                    .map(|value| Duration::from_secs(value as u64)),
+                meal_type: row.meal_type,
+            })
+            .collect())
     }
 }
 
@@ -583,6 +641,294 @@ mod tests {
             check!(remaining_recipes.len() == 1);
             check!(remaining_recipes[0].recipe_id == created1.recipe_id);
             check!(remaining_recipes[0].name == "Keep This");
+        }
+    }
+
+    mod search_recipes {
+        use super::*;
+
+        #[sqlx::test(migrator = "super::MIGRATOR")]
+        async fn it_returns_empty_list_when_no_recipes_match(pool: PgPool) {
+            let repository = Postgres::new(pool);
+
+            let args = SearchRecipesArguments {
+                recipe_name: Some("Nonexistent Recipe".to_string()),
+                ingredient_name: None,
+                meal_type: None,
+            };
+
+            let result = repository.search_recipes(args).await;
+
+            let_assert!(Ok(recipes) = result);
+            check!(recipes.is_empty());
+        }
+
+        #[sqlx::test(migrator = "super::MIGRATOR")]
+        async fn it_finds_recipe_by_exact_name(pool: PgPool) {
+            let repository = Postgres::new(pool);
+
+            let recipe1 = create_test_recipe("Pancakes", MealType::Breakfast);
+            let recipe2 = create_test_recipe("Pasta", MealType::Dinner);
+
+            let_assert!(Ok(_) = repository.create_recipe(recipe1).await);
+            let_assert!(Ok(_) = repository.create_recipe(recipe2).await);
+
+            let args = SearchRecipesArguments {
+                recipe_name: Some("Pancakes".to_string()),
+                ingredient_name: None,
+                meal_type: None,
+            };
+
+            let result = repository.search_recipes(args).await;
+
+            let_assert!(Ok(recipes) = result);
+            check!(recipes.len() == 1);
+            check!(recipes[0].name == "Pancakes");
+            check!(matches!(recipes[0].meal_type, MealType::Breakfast));
+        }
+
+        #[sqlx::test(migrator = "super::MIGRATOR")]
+        async fn it_finds_recipe_by_partial_name(pool: PgPool) {
+            let repository = Postgres::new(pool);
+
+            let recipe1 = create_test_recipe("Chocolate Pancakes", MealType::Breakfast);
+            let recipe2 = create_test_recipe("Banana Pancakes", MealType::Breakfast);
+            let recipe3 = create_test_recipe("Pasta Bolognese", MealType::Dinner);
+
+            let_assert!(Ok(_) = repository.create_recipe(recipe1).await);
+            let_assert!(Ok(_) = repository.create_recipe(recipe2).await);
+            let_assert!(Ok(_) = repository.create_recipe(recipe3).await);
+
+            let args = SearchRecipesArguments {
+                recipe_name: Some("Pancake".to_string()),
+                ingredient_name: None,
+                meal_type: None,
+            };
+
+            let result = repository.search_recipes(args).await;
+
+            let_assert!(Ok(recipes) = result);
+            check!(recipes.len() == 2);
+            check!(recipes.iter().any(|r| r.name == "Chocolate Pancakes"));
+            check!(recipes.iter().any(|r| r.name == "Banana Pancakes"));
+        }
+
+        #[sqlx::test(migrator = "super::MIGRATOR")]
+        async fn it_finds_recipe_by_ingredient_name(pool: PgPool) {
+            let repository = Postgres::new(pool);
+
+            let recipe_with_flour = MutableRecipeEntity {
+                name: "Bread".to_string(),
+                description: None,
+                ingredients: vec![
+                    create_test_ingredient("Flour", 500.0, QuantityType::Gram),
+                    create_test_ingredient("Water", 300.0, QuantityType::Milliliter),
+                ],
+                cooking_time: None,
+                meal_type: MealType::Lunch,
+            };
+
+            let recipe_without_flour = create_test_recipe("Salad", MealType::Lunch);
+
+            let_assert!(Ok(_) = repository.create_recipe(recipe_with_flour).await);
+            let_assert!(Ok(_) = repository.create_recipe(recipe_without_flour).await);
+
+            let args = SearchRecipesArguments {
+                recipe_name: None,
+                ingredient_name: Some("Flour".to_string()),
+                meal_type: None,
+            };
+
+            let result = repository.search_recipes(args).await;
+
+            let_assert!(Ok(recipes) = result);
+            check!(recipes.len() == 1);
+            check!(recipes[0].name == "Bread");
+        }
+
+        #[sqlx::test(migrator = "super::MIGRATOR")]
+        async fn it_finds_recipe_by_partial_ingredient_name(pool: PgPool) {
+            let repository = Postgres::new(pool);
+
+            let recipe_with_chocolate = MutableRecipeEntity {
+                name: "Chocolate Cake".to_string(),
+                description: None,
+                ingredients: vec![
+                    create_test_ingredient("Dark Chocolate", 200.0, QuantityType::Gram),
+                    create_test_ingredient("Flour", 300.0, QuantityType::Gram),
+                ],
+                cooking_time: None,
+                meal_type: MealType::Dinner,
+            };
+
+            let recipe_with_milk = MutableRecipeEntity {
+                name: "Hot Chocolate".to_string(),
+                description: None,
+                ingredients: vec![
+                    create_test_ingredient("Milk Chocolate", 100.0, QuantityType::Gram),
+                    create_test_ingredient("Milk", 250.0, QuantityType::Milliliter),
+                ],
+                cooking_time: None,
+                meal_type: MealType::Breakfast,
+            };
+
+            let recipe_without_chocolate = create_test_recipe("Vanilla Pudding", MealType::Dinner);
+
+            let_assert!(Ok(_) = repository.create_recipe(recipe_with_chocolate).await);
+            let_assert!(Ok(_) = repository.create_recipe(recipe_with_milk).await);
+            let_assert!(Ok(_) = repository.create_recipe(recipe_without_chocolate).await);
+
+            let args = SearchRecipesArguments {
+                recipe_name: None,
+                ingredient_name: Some("Chocolate".to_string()),
+                meal_type: None,
+            };
+
+            let result = repository.search_recipes(args).await;
+
+            let_assert!(Ok(recipes) = result);
+            check!(recipes.len() == 2);
+            check!(recipes.iter().any(|r| r.name == "Chocolate Cake"));
+            check!(recipes.iter().any(|r| r.name == "Hot Chocolate"));
+        }
+
+        #[sqlx::test(migrator = "super::MIGRATOR")]
+        async fn it_finds_recipe_by_meal_type(pool: PgPool) {
+            let repository = Postgres::new(pool);
+
+            let breakfast_recipe = create_test_recipe("Pancakes", MealType::Breakfast);
+            let lunch_recipe = create_test_recipe("Sandwich", MealType::Lunch);
+            let dinner_recipe = create_test_recipe("Pasta", MealType::Dinner);
+
+            let_assert!(Ok(_) = repository.create_recipe(breakfast_recipe).await);
+            let_assert!(Ok(_) = repository.create_recipe(lunch_recipe).await);
+            let_assert!(Ok(_) = repository.create_recipe(dinner_recipe).await);
+
+            let args = SearchRecipesArguments {
+                recipe_name: None,
+                ingredient_name: None,
+                meal_type: Some(MealType::Breakfast),
+            };
+
+            let result = repository.search_recipes(args).await;
+
+            let_assert!(Ok(recipes) = result);
+            check!(recipes.len() == 1);
+            check!(recipes[0].name == "Pancakes");
+            check!(matches!(recipes[0].meal_type, MealType::Breakfast));
+        }
+
+        #[sqlx::test(migrator = "super::MIGRATOR")]
+        async fn it_combines_multiple_search_criteria(pool: PgPool) {
+            let repository = Postgres::new(pool);
+
+            let matching_recipe = MutableRecipeEntity {
+                name: "Breakfast Pancakes".to_string(),
+                description: None,
+                ingredients: vec![
+                    create_test_ingredient("Flour", 200.0, QuantityType::Gram),
+                    create_test_ingredient("Milk", 300.0, QuantityType::Milliliter),
+                ],
+                cooking_time: None,
+                meal_type: MealType::Breakfast,
+            };
+
+            let non_matching_name = MutableRecipeEntity {
+                name: "Dinner Bread".to_string(),
+                description: None,
+                ingredients: vec![create_test_ingredient("Flour", 500.0, QuantityType::Gram)],
+                cooking_time: None,
+                meal_type: MealType::Breakfast,
+            };
+
+            let non_matching_meal_type = MutableRecipeEntity {
+                name: "Breakfast Toast".to_string(),
+                description: None,
+                ingredients: vec![create_test_ingredient("Flour", 100.0, QuantityType::Gram)],
+                cooking_time: None,
+                meal_type: MealType::Dinner,
+            };
+
+            let_assert!(Ok(_) = repository.create_recipe(matching_recipe).await);
+            let_assert!(Ok(_) = repository.create_recipe(non_matching_name).await);
+            let_assert!(Ok(_) = repository.create_recipe(non_matching_meal_type).await);
+
+            let args = SearchRecipesArguments {
+                recipe_name: Some("Pancake".to_string()),
+                ingredient_name: Some("Flour".to_string()),
+                meal_type: Some(MealType::Breakfast),
+            };
+
+            let result = repository.search_recipes(args).await;
+
+            let_assert!(Ok(recipes) = result);
+            check!(recipes.len() == 1);
+            check!(recipes[0].name == "Breakfast Pancakes");
+        }
+
+        #[sqlx::test(migrator = "super::MIGRATOR")]
+        async fn it_returns_all_recipes_when_all_criteria_are_none(pool: PgPool) {
+            let repository = Postgres::new(pool);
+
+            let recipe1 = create_test_recipe("Recipe 1", MealType::Breakfast);
+            let recipe2 = create_test_recipe("Recipe 2", MealType::Lunch);
+            let recipe3 = create_test_recipe("Recipe 3", MealType::Dinner);
+
+            let_assert!(Ok(_) = repository.create_recipe(recipe1).await);
+            let_assert!(Ok(_) = repository.create_recipe(recipe2).await);
+            let_assert!(Ok(_) = repository.create_recipe(recipe3).await);
+
+            let args = SearchRecipesArguments {
+                recipe_name: None,
+                ingredient_name: None,
+                meal_type: None,
+            };
+
+            let result = repository.search_recipes(args).await;
+
+            let_assert!(Ok(recipes) = result);
+            check!(recipes.len() == 3);
+        }
+
+        #[sqlx::test(migrator = "super::MIGRATOR")]
+        async fn it_search_is_case_insensitive(pool: PgPool) {
+            let repository = Postgres::new(pool);
+
+            let recipe = MutableRecipeEntity {
+                name: "UPPERCASE Recipe".to_string(),
+                description: None,
+                ingredients: vec![create_test_ingredient(
+                    "UPPERCASE Ingredient",
+                    1.0,
+                    QuantityType::Count,
+                )],
+                cooking_time: None,
+                meal_type: MealType::Lunch,
+            };
+
+            let_assert!(Ok(_) = repository.create_recipe(recipe).await);
+
+            // Test case insensitive recipe name search
+            let args = SearchRecipesArguments {
+                recipe_name: Some("uppercase".to_string()),
+                ingredient_name: None,
+                meal_type: None,
+            };
+
+            let result = repository.search_recipes(args).await;
+            let_assert!(Ok(recipes) = result);
+            check!(recipes.len() == 1);
+
+            // Test case insensitive ingredient name search
+            let args = SearchRecipesArguments {
+                recipe_name: None,
+                ingredient_name: Some("uppercase ingredient".to_string()),
+                meal_type: None,
+            };
+
+            let result = repository.search_recipes(args).await;
+            let_assert!(Ok(recipes) = result);
+            check!(recipes.len() == 1);
         }
     }
 }

@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crate::persistance::recipe::{
     IngredientEntity, MutableIngredientEntity, MutableRecipeEntity, RecipeEntity, RecipeRepository,
+    SearchRecipesArguments,
 };
 use thiserror::Error;
 
@@ -89,6 +90,13 @@ pub(crate) struct NewRecipe {
     pub(crate) meal_type: MealType,
 }
 
+#[derive(Debug)]
+pub(crate) struct SearchCriteria {
+    pub(crate) recipe_name: Option<String>,
+    pub(crate) ingredient_name: Option<String>,
+    pub(crate) meal_type: Option<MealType>,
+}
+
 impl From<NewRecipe> for MutableRecipeEntity {
     fn from(value: NewRecipe) -> Self {
         Self {
@@ -173,6 +181,24 @@ pub(crate) enum ListRecipeError {
         #[source]
         eyre::Report,
     ),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum SearchRecipeError {
+    #[error("An unknown error occured: {0:}")]
+    Unknown(
+        #[from]
+        #[source]
+        eyre::Report,
+    ),
+}
+
+impl From<crate::persistance::recipe::SearchRecipeError> for SearchRecipeError {
+    fn from(value: crate::persistance::recipe::SearchRecipeError) -> Self {
+        match value {
+            crate::persistance::recipe::SearchRecipeError::Unknown(report) => Self::Unknown(report),
+        }
+    }
 }
 
 impl From<crate::persistance::recipe::ListRecipeError> for ListRecipeError {
@@ -270,5 +296,19 @@ impl<RR: RecipeRepository> RecipeService<RR> {
     pub(crate) async fn delete_recipe(&self, recipe_id: i32) -> Result<(), DeleteRecipeError> {
         self.repository.delete_recipe(recipe_id).await?;
         Ok(())
+    }
+
+    pub(crate) async fn search_recipes(
+        &self,
+        criteria: SearchCriteria,
+    ) -> Result<Vec<Recipe>, SearchRecipeError> {
+        let args = SearchRecipesArguments {
+            recipe_name: criteria.recipe_name,
+            ingredient_name: criteria.ingredient_name,
+            meal_type: criteria.meal_type.map(|mt| mt.into()),
+        };
+
+        let entities = self.repository.search_recipes(args).await?;
+        Ok(entities.into_iter().map(Recipe::from).collect())
     }
 }

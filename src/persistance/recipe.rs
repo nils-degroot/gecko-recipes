@@ -40,6 +40,13 @@ pub(crate) struct MutableIngredientEntity {
     pub(crate) quantity: f32,
 }
 
+#[derive(Debug)]
+pub(crate) struct SearchRecipesArguments {
+    pub(crate) recipe_name: Option<String>,
+    pub(crate) ingredient_name: Option<String>,
+    pub(crate) meal_type: Option<MealType>,
+}
+
 #[derive(Debug, Type, Serialize, Deserialize)]
 #[sqlx(type_name = "quantity_type")]
 pub(crate) enum QuantityType {
@@ -102,6 +109,16 @@ pub(crate) enum DeleteRecipeError {
     NotFound,
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum SearchRecipeError {
+    #[error("An unknown error occured: {0:}")]
+    Unknown(
+        #[from]
+        #[source]
+        eyre::Report,
+    ),
+}
+
 pub(crate) trait RecipeRepository: std::fmt::Debug + Clone + Send + Sync + 'static {
     async fn list_recipes(&self) -> Result<Vec<RecipeEntity>, ListRecipeError>;
 
@@ -117,4 +134,9 @@ pub(crate) trait RecipeRepository: std::fmt::Debug + Clone + Send + Sync + 'stat
     ) -> Result<RecipeEntity, UpdateRecipeError>;
 
     async fn delete_recipe(&self, recipe_id: i32) -> Result<(), DeleteRecipeError>;
+
+    async fn search_recipes(
+        &self,
+        args: SearchRecipesArguments,
+    ) -> Result<Vec<RecipeEntity>, SearchRecipeError>;
 }
